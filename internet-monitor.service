@@ -1,0 +1,15 @@
+[Unit]
+Description=FranticDave Internet Monitor
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=franticdave
+WorkingDirectory=/home/franticdave/internet-monitor
+ExecStart=/usr/bin/python3 /home/franticdave/internet-monitor/internet_monitor.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
