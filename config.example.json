@@ -5,7 +5,7 @@
   "email_after_seconds": 60,
   "config_refresh_seconds": 60,
   "status_interval_seconds": 60,
-  "status_log_enabled": true,
+  "status_log_enabled": false,
   "status_log_interval_hours": 24,
   "connect_timeout_seconds": 3,
   "email_enabled": true,
