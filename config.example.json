@@ -1,7 +1,15 @@
 {
+  "site_name": "Ashton Test Monitor",
   "check_interval_seconds": 5,
-  "outage_threshold_seconds": 30,
+  "log_after_seconds": 10,
+  "email_after_seconds": 60,
+  "config_refresh_seconds": 60,
   "connect_timeout_seconds": 3,
+  "email_enabled": true,
+  "recovery_email_enabled": true,
+  "email_to": "david@cabmaster.com",
+  "email_from": "farjeoncourt@gmail.com",
+  "remote_config_url": "",
   "targets": [
     {"host": "1.1.1.1", "port": 443},
     {"host": "8.8.8.8", "port": 53},
