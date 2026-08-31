@@ -23,6 +23,7 @@ DEFAULT_CONFIG = {
     "log_after_seconds": 10,
     "email_after_seconds": 60,
     "config_refresh_seconds": 60,
+    "status_interval_seconds": 60,
     "connect_timeout_seconds": 3,
     "email_enabled": True,
     "recovery_email_enabled": True,
@@ -181,6 +182,39 @@ def clear_active_outage():
         pass
 
 
+def print_config_summary(config, cached_remote):
+    remote_url = str(config.get("remote_config_url", "")).strip()
+    print(f"{now().isoformat()} Site: {config.get('site_name')}", flush=True)
+    print(
+        f"{now().isoformat()} Monitoring every {config.get('check_interval_seconds')}s | "
+        f"log after {config.get('log_after_seconds')}s | "
+        f"email after {config.get('email_after_seconds')}s",
+        flush=True
+    )
+    print(
+        f"{now().isoformat()} Email: {config.get('email_from')} -> {config.get('email_to')} | "
+        f"enabled={bool(config.get('email_enabled', True))}",
+        flush=True
+    )
+    if remote_url:
+        source = "cached remote config available" if cached_remote else "no cached remote config yet"
+        print(
+            f"{now().isoformat()} Remote config enabled | refresh every "
+            f"{config.get('config_refresh_seconds')}s | {source}",
+            flush=True
+        )
+    else:
+        print(
+            f"{now().isoformat()} Remote config NOT CONFIGURED. "
+            f"Set remote_config_url in config.json when the Google Drive config URL is ready.",
+            flush=True
+        )
+    print(
+        f"{now().isoformat()} Status heartbeat every {config.get('status_interval_seconds', 60)}s",
+        flush=True
+    )
+
+
 def main():
     ensure_log()
     print(f"{now().isoformat()} FranticDave Internet Monitor started", flush=True)
@@ -188,7 +222,10 @@ def main():
     local_config = load_local_config()
     cached_remote = load_cached_remote_config()
     config = merge_config({**local_config, **(cached_remote or {})})
+    print_config_summary(config, cached_remote)
+
     last_remote_refresh = 0.0
+    last_status = 0.0
 
     failure_started = None
     log_threshold_reached = False
@@ -207,7 +244,7 @@ def main():
                     remote = fetch_remote_config(remote_url)
                     save_json(REMOTE_CACHE_FILE, remote)
                     cached_remote = remote
-                    print(f"{now().isoformat()} Remote config refreshed", flush=True)
+                    print(f"{now().isoformat()} Remote config refreshed successfully", flush=True)
                 except Exception as exc:
                     print(f"{now().isoformat()} Remote config refresh failed, keeping last good config: {exc}", flush=True)
 
@@ -215,10 +252,19 @@ def main():
         interval = max(1, float(config.get("check_interval_seconds", 5)))
         log_after = max(1, float(config.get("log_after_seconds", 10)))
         email_after = max(log_after, float(config.get("email_after_seconds", 60)))
+        status_interval = max(10, float(config.get("status_interval_seconds", 60)))
         current = now()
         online = internet_is_up(config)
 
         if online:
+            if current_monotonic - last_status >= status_interval:
+                last_status = current_monotonic
+                print(
+                    f"{current.isoformat()} STATUS OK | internet online | "
+                    f"site={config.get('site_name')} | next check in {interval:g}s",
+                    flush=True
+                )
+
             if failure_started is not None:
                 duration = (current - failure_started).total_seconds()
 
