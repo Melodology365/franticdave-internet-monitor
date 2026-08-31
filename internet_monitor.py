@@ -15,6 +15,7 @@ CONFIG_FILE = BASE_DIR / "config.json"
 REMOTE_CACHE_FILE = BASE_DIR / "remote_config_cache.json"
 SECRETS_FILE = BASE_DIR / "secrets.json"
 LOG_FILE = BASE_DIR / "outages.csv"
+STATUS_LOG_FILE = BASE_DIR / "status.csv"
 ACTIVE_OUTAGE_FILE = BASE_DIR / "active_outage.json"
 
 DEFAULT_CONFIG = {
@@ -24,6 +25,8 @@ DEFAULT_CONFIG = {
     "email_after_seconds": 60,
     "config_refresh_seconds": 60,
     "status_interval_seconds": 60,
+    "status_log_enabled": True,
+    "status_log_interval_hours": 24,
     "connect_timeout_seconds": 3,
     "email_enabled": True,
     "recovery_email_enabled": True,
@@ -85,23 +88,17 @@ def fetch_remote_config(url, timeout=10):
     return remote
 
 
-def post_remote_outage(config, started, ended, email_required, email_sent):
+def get_remote_endpoint(config):
     endpoint = str(config.get("remote_log_url", "")).strip()
     if not endpoint:
         endpoint = str(config.get("remote_config_url", "")).strip()
+    return endpoint
+
+
+def post_json(config, payload):
+    endpoint = get_remote_endpoint(config)
     if not endpoint:
         return False
-
-    duration = (ended - started).total_seconds()
-    payload = {
-        "site_name": config.get("site_name", "Internet Monitor"),
-        "outage_started": started.isoformat(timespec="seconds"),
-        "outage_ended": ended.isoformat(timespec="seconds"),
-        "duration_seconds": round(duration, 1),
-        "duration_minutes": round(duration / 60, 2),
-        "email_required": "yes" if email_required else "no",
-        "email_sent": "yes" if email_sent else "no"
-    }
 
     data = json.dumps(payload).encode("utf-8")
     request = urllib.request.Request(
@@ -117,8 +114,28 @@ def post_remote_outage(config, started, ended, email_required, email_sent):
         raw = response.read().decode("utf-8")
     result = json.loads(raw)
     if not isinstance(result, dict) or not result.get("success"):
-        raise RuntimeError(f"Remote log rejected outage: {raw}")
+        raise RuntimeError(f"Remote log rejected entry: {raw}")
     return True
+
+
+def post_remote_outage(config, started, ended, email_required, email_sent):
+    duration = (ended - started).total_seconds()
+    payload = {
+        "log_type": "outage",
+        "site_name": config.get("site_name", "Internet Monitor"),
+        "outage_started": started.isoformat(timespec="seconds"),
+        "outage_ended": ended.isoformat(timespec="seconds"),
+        "duration_seconds": round(duration, 1),
+        "duration_minutes": round(duration / 60, 2),
+        "email_required": "yes" if email_required else "no",
+        "email_sent": "yes" if email_sent else "no"
+    }
+    return post_json(config, payload)
+
+
+def post_remote_status(config, record):
+    payload = {"log_type": "status", **record}
+    return post_json(config, payload)
 
 
 def internet_is_up(config):
@@ -155,6 +172,28 @@ def ensure_log():
         ])
 
 
+def ensure_status_log():
+    if STATUS_LOG_FILE.exists():
+        return
+
+    with STATUS_LOG_FILE.open("w", newline="", encoding="utf-8") as file:
+        writer = csv.writer(file)
+        writer.writerow([
+            "site_name",
+            "entry_type",
+            "timestamp",
+            "monitor_started",
+            "monitor_uptime_hours",
+            "total_checks",
+            "failed_checks",
+            "total_outages",
+            "session_outages",
+            "last_outage_started",
+            "last_outage_duration_seconds",
+            "current_status"
+        ])
+
+
 def log_outage(site_name, started, ended, email_required, email_sent):
     duration = (ended - started).total_seconds()
 
@@ -168,6 +207,65 @@ def log_outage(site_name, started, ended, email_required, email_sent):
             round(duration / 60, 2),
             "yes" if email_required else "no",
             "yes" if email_sent else "no"
+        ])
+
+
+def read_outage_history():
+    total = 0
+    last_started = ""
+    last_duration = ""
+
+    try:
+        with LOG_FILE.open("r", newline="", encoding="utf-8") as file:
+            reader = csv.DictReader(file)
+            for row in reader:
+                if not row.get("outage_started"):
+                    continue
+                total += 1
+                last_started = row.get("outage_started", "")
+                last_duration = row.get("duration_seconds", "")
+    except Exception as exc:
+        print(f"{now().isoformat()} Could not read outage history: {exc}", flush=True)
+
+    return total, last_started, last_duration
+
+
+def make_status_record(config, entry_type, timestamp, monitor_started, total_checks,
+                       failed_checks, total_outages, session_outages,
+                       last_outage_started, last_outage_duration, current_status):
+    uptime_hours = max(0.0, (timestamp - monitor_started).total_seconds() / 3600)
+    return {
+        "site_name": config.get("site_name", "Internet Monitor"),
+        "entry_type": entry_type,
+        "timestamp": timestamp.isoformat(timespec="seconds"),
+        "monitor_started": monitor_started.isoformat(timespec="seconds"),
+        "monitor_uptime_hours": round(uptime_hours, 2),
+        "total_checks": total_checks,
+        "failed_checks": failed_checks,
+        "total_outages": total_outages,
+        "session_outages": session_outages,
+        "last_outage_started": last_outage_started,
+        "last_outage_duration_seconds": last_outage_duration,
+        "current_status": current_status
+    }
+
+
+def append_local_status(record):
+    with STATUS_LOG_FILE.open("a", newline="", encoding="utf-8") as file:
+        writer = csv.writer(file)
+        writer.writerow([
+            record["site_name"],
+            record["entry_type"],
+            record["timestamp"],
+            record["monitor_started"],
+            record["monitor_uptime_hours"],
+            record["total_checks"],
+            record["failed_checks"],
+            record["total_outages"],
+            record["session_outages"],
+            record["last_outage_started"],
+            record["last_outage_duration_seconds"],
+            record["current_status"]
         ])
 
 
@@ -248,22 +346,42 @@ def print_config_summary(config, cached_remote):
             flush=True
         )
     print(
-        f"{now().isoformat()} Status heartbeat every {config.get('status_interval_seconds', 60)}s",
+        f"{now().isoformat()} Console heartbeat every {config.get('status_interval_seconds', 60)}s | "
+        f"audit log every {config.get('status_log_interval_hours', 24)}h | "
+        f"enabled={bool(config.get('status_log_enabled', True))}",
         flush=True
     )
 
 
 def main():
     ensure_log()
-    print(f"{now().isoformat()} FranticDave Internet Monitor started", flush=True)
+    ensure_status_log()
+    monitor_started = now()
+    print(f"{monitor_started.isoformat()} FranticDave Internet Monitor started", flush=True)
 
     local_config = load_local_config()
     cached_remote = load_cached_remote_config()
     config = merge_config({**local_config, **(cached_remote or {})})
     print_config_summary(config, cached_remote)
 
+    total_outages, last_outage_started, last_outage_duration = read_outage_history()
+    total_checks = 0
+    failed_checks = 0
+    session_outages = 0
+
+    startup_record = make_status_record(
+        config, "STARTED", monitor_started, monitor_started,
+        total_checks, failed_checks, total_outages, session_outages,
+        last_outage_started, last_outage_duration, "STARTING"
+    )
+    append_local_status(startup_record)
+    print(f"{now().isoformat()} STARTED entry written to local audit log", flush=True)
+
+    startup_remote_pending = bool(config.get("status_log_enabled", True))
+    last_startup_upload_attempt = 0.0
     last_remote_refresh = 0.0
     last_status = 0.0
+    last_status_log = time.monotonic()
 
     failure_started = None
     log_threshold_reached = False
@@ -271,8 +389,9 @@ def main():
 
     while True:
         local_config = load_local_config()
-        refresh_seconds = max(10, float(local_config.get("config_refresh_seconds", 60)))
         current_monotonic = time.monotonic()
+        config = merge_config({**local_config, **(cached_remote or {})})
+        refresh_seconds = max(10, float(config.get("config_refresh_seconds", 60)))
 
         if current_monotonic - last_remote_refresh >= refresh_seconds:
             last_remote_refresh = current_monotonic
@@ -289,17 +408,35 @@ def main():
         config = merge_config({**local_config, **(cached_remote or {})})
         interval = max(1, float(config.get("check_interval_seconds", 5)))
         log_after = max(1, float(config.get("log_after_seconds", 10)))
-        email_after = max(log_after, float(config.get("email_after_seconds", 60)))
+        email_after = max(1, float(config.get("email_after_seconds", 60)))
         status_interval = max(10, float(config.get("status_interval_seconds", 60)))
+        status_log_hours = max(0.01, float(config.get("status_log_interval_hours", 24)))
+        status_log_seconds = status_log_hours * 3600
+        status_log_enabled = bool(config.get("status_log_enabled", True))
         current = now()
         online = internet_is_up(config)
+        total_checks += 1
+
+        if not online:
+            failed_checks += 1
 
         if online:
+            if startup_remote_pending and status_log_enabled and current_monotonic - last_startup_upload_attempt >= 60:
+                last_startup_upload_attempt = current_monotonic
+                try:
+                    startup_record["current_status"] = "ONLINE"
+                    if post_remote_status(config, startup_record):
+                        startup_remote_pending = False
+                        print(f"{current.isoformat()} STARTED entry uploaded to Google Drive status log", flush=True)
+                except Exception as exc:
+                    print(f"{current.isoformat()} Remote STARTED status upload failed: {exc}", flush=True)
+
             if current_monotonic - last_status >= status_interval:
                 last_status = current_monotonic
                 print(
                     f"{current.isoformat()} STATUS OK | internet online | "
-                    f"site={config.get('site_name')} | next check in {interval:g}s",
+                    f"site={config.get('site_name')} | checks={total_checks} | "
+                    f"confirmed outages this session={session_outages} | next check in {interval:g}s",
                     flush=True
                 )
 
@@ -329,6 +466,11 @@ def main():
                         email_required,
                         email_sent
                     )
+
+                    total_outages += 1
+                    session_outages += 1
+                    last_outage_started = failure_started.isoformat(timespec="seconds")
+                    last_outage_duration = round(duration, 1)
 
                     try:
                         if post_remote_outage(config, failure_started, current, email_required, email_sent):
@@ -369,6 +511,28 @@ def main():
                     f"(down for {elapsed:.1f} seconds; email will be sent on recovery)",
                     flush=True
                 )
+
+        if status_log_enabled and current_monotonic - last_status_log >= status_log_seconds:
+            last_status_log = current_monotonic
+            current_status = "ONLINE" if online else "OFFLINE"
+            record = make_status_record(
+                config, "STATUS", current, monitor_started,
+                total_checks, failed_checks, total_outages, session_outages,
+                last_outage_started, last_outage_duration, current_status
+            )
+            append_local_status(record)
+            print(
+                f"{current.isoformat()} STATUS entry written to local audit log | "
+                f"checks={total_checks} | failed checks={failed_checks} | total outages={total_outages}",
+                flush=True
+            )
+
+            if online:
+                try:
+                    if post_remote_status(config, record):
+                        print(f"{current.isoformat()} STATUS entry uploaded to Google Drive status log", flush=True)
+                except Exception as exc:
+                    print(f"{current.isoformat()} Remote STATUS upload failed: {exc}", flush=True)
 
         time.sleep(interval)
 
