@@ -30,6 +30,7 @@ DEFAULT_CONFIG = {
     "email_to": "david@cabmaster.com",
     "email_from": "farjeoncourt@gmail.com",
     "remote_config_url": "",
+    "remote_log_url": "",
     "targets": [
         {"host": "1.1.1.1", "port": 443},
         {"host": "8.8.8.8", "port": 53},
@@ -82,6 +83,42 @@ def fetch_remote_config(url, timeout=10):
     if not isinstance(remote, dict):
         raise ValueError("Remote config must be a JSON object")
     return remote
+
+
+def post_remote_outage(config, started, ended, email_required, email_sent):
+    endpoint = str(config.get("remote_log_url", "")).strip()
+    if not endpoint:
+        endpoint = str(config.get("remote_config_url", "")).strip()
+    if not endpoint:
+        return False
+
+    duration = (ended - started).total_seconds()
+    payload = {
+        "site_name": config.get("site_name", "Internet Monitor"),
+        "outage_started": started.isoformat(timespec="seconds"),
+        "outage_ended": ended.isoformat(timespec="seconds"),
+        "duration_seconds": round(duration, 1),
+        "duration_minutes": round(duration / 60, 2),
+        "email_required": "yes" if email_required else "no",
+        "email_sent": "yes" if email_sent else "no"
+    }
+
+    data = json.dumps(payload).encode("utf-8")
+    request = urllib.request.Request(
+        endpoint,
+        data=data,
+        headers={
+            "Content-Type": "application/json",
+            "User-Agent": "FranticDaveInternetMonitor/1.0"
+        },
+        method="POST"
+    )
+    with urllib.request.urlopen(request, timeout=15) as response:
+        raw = response.read().decode("utf-8")
+    result = json.loads(raw)
+    if not isinstance(result, dict) or not result.get("success"):
+        raise RuntimeError(f"Remote log rejected outage: {raw}")
+    return True
 
 
 def internet_is_up(config):
@@ -203,6 +240,7 @@ def print_config_summary(config, cached_remote):
             f"{config.get('config_refresh_seconds')}s | {source}",
             flush=True
         )
+        print(f"{now().isoformat()} Remote outage logging enabled", flush=True)
     else:
         print(
             f"{now().isoformat()} Remote config NOT CONFIGURED. "
@@ -291,6 +329,13 @@ def main():
                         email_required,
                         email_sent
                     )
+
+                    try:
+                        if post_remote_outage(config, failure_started, current, email_required, email_sent):
+                            print(f"{current.isoformat()} Outage uploaded to Google Drive log", flush=True)
+                    except Exception as exc:
+                        print(f"{current.isoformat()} Remote outage log upload failed: {exc}", flush=True)
+
                     print(
                         f"{current.isoformat()} INTERNET RESTORED after {duration:.1f} seconds",
                         flush=True
